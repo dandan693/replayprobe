@@ -1,0 +1,11 @@
+{
+  "name": "model_swap",
+  "max_severity": "d3_conclusion",
+  "divergence_floor": "d3_conclusion",
+  "allow_fork_after": null,
+  "max_divergence_ratio": 0.5,
+  "min_matched_ratio": 0.4,
+  "forbid_crash": true,
+  "forbid_safety_fork": true,
+  "notes": "换模型专用：路径允许大改（不同模型的 SQL 写法、措辞习惯本来就不同），但**结论不许变**，且绝不能出现安全分叉。这是「换便宜模型省下的钱，值不值得」这个问题的可执行版本。divergence_floor 抬到 d3：路径变了不算「它被碰到」，结论变了才算 —— 否则这份预算会跟自己的 max_severity 打架、永远无法通过。这一条是拿真实模型实测逼出来的，经过写在 budget.py 模块开头。"
+}

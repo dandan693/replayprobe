@@ -1,0 +1,11 @@
+{
+  "name": "prompt_tweak",
+  "max_severity": "d2_path",
+  "divergence_floor": "d2_path",
+  "allow_fork_after": 2,
+  "max_divergence_ratio": 0.3,
+  "min_matched_ratio": 0.6,
+  "forbid_crash": true,
+  "forbid_safety_fork": true,
+  "notes": "改提示词专用：前 2 步（选工具、取数）必须完全稳定，之后允许最多 30% 的任务出现路径分叉。把「这次改动的影响范围」从形容词变成一个数字 —— allow_fork_after 是这份预算真正的那条线，比率只是兜底。"
+}

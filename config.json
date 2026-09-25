@@ -1,0 +1,33 @@
+{
+  "project": {
+    "name": "replayprobe",
+    "version": "0.1.0",
+    "description": "Agent 轨迹回放与分叉诊断：录一次，改一个变量，再放一遍。"
+  },
+  "data": {
+    "truth_db": "data/truth/retail_truth.db",
+    "tapes_dir": "data/tapes",
+    "budgets_dir": "data/budgets",
+    "reports_dir": "reports"
+  },
+  "signature": {
+    "min_int_digits": 3,
+    "_comment": "整数要 >= 100 才算结论性数字。百分比与小数不受此限制 —— 见 signature._is_significant 里的说明。"
+  },
+  "diverge": {
+    "text_sim_threshold": 0.85,
+    "_comment": "全项目唯一的模糊判据，只在「两边都没有显著数字」时启用。它必须显式可见、且报告里要回显。"
+  },
+  "agent": {
+    "max_steps": 8,
+    "system_prompt_version": "react-v1"
+  },
+  "llm": {
+    "provider": "openai-compatible",
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "model": "qwen-plus",
+    "temperature": 0.0,
+    "_comment": "temperature=0 也做不到逐字复现 —— 这正是本项目存在的理由，别把它当保证。",
+    "api_key_file": ""
+  }
+}

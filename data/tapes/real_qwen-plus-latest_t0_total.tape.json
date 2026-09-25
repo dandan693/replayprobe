@@ -1,0 +1,91 @@
+{
+  "manifest": {
+    "tape_id": "t0_1.tape",
+    "task_id": "total",
+    "created_at": "2026-09-25T10:35:12",
+    "agent_variant": "react-v1",
+    "model": "qwen-plus-latest",
+    "model_revision": "",
+    "prompt_hash": "a234d49997639662",
+    "tool_schema_hash": "2ea1db9e4775c191",
+    "dataset_snapshot": "retail_truth.db",
+    "notes": "llm=real; label=real:qwen-plus-latest@t0.0; max_steps=8",
+    "limitations": [
+      "真实模型的返回**不保证可复现**：temperature=0 只是降低随机性，不等于确定性 —— 而这恰恰是本工具要测量的对象，不是它的缺陷。",
+      "轨迹里记录的是该次调用的实际返回；上游若对同一 prompt 做了缓存或路由，本工具无从知晓，也不假装知道。",
+      "只记录了模型别名，未记录具体服务版本 —— 别名可能指向不同权重"
+    ]
+  },
+  "entries": [
+    {
+      "seq": 1,
+      "kind": "llm_call",
+      "key": "llm:f6403596ea4a837e",
+      "payload": {
+        "content": "",
+        "tool_call": {
+          "name": "run_sql",
+          "arguments": {
+            "sql": "SELECT SUM(Amount) AS total_sales FROM retail"
+          }
+        },
+        "finish": "tool_use"
+      },
+      "input_hash": "f6403596ea4a837e",
+      "output_hash": "dc8c0e29428b4546",
+      "parent_seq": null,
+      "meta": {
+        "model": "qwen-plus-latest",
+        "usage": {
+          "completion_tokens": 28,
+          "prompt_tokens": 513,
+          "total_tokens": 541
+        },
+        "finish_reason": "tool_calls"
+      }
+    },
+    {
+      "seq": 2,
+      "kind": "tool_call",
+      "key": "tool:run_sql:2b6f1cb954db6a9e",
+      "payload": {
+        "name": "run_sql",
+        "arguments": {
+          "sql": "SELECT SUM(Amount) AS total_sales FROM retail"
+        },
+        "ok": true,
+        "value": [
+          {
+            "total_sales": 8887208.894
+          }
+        ]
+      },
+      "input_hash": "2b6f1cb954db6a9e",
+      "output_hash": "ccee6bea94bc5333",
+      "parent_seq": null,
+      "meta": {}
+    },
+    {
+      "seq": 3,
+      "kind": "llm_call",
+      "key": "llm:6e411d1764ce1ce8",
+      "payload": {
+        "content": "全量总销售额是 8887208.894 美元。",
+        "tool_call": null,
+        "finish": "stop"
+      },
+      "input_hash": "6e411d1764ce1ce8",
+      "output_hash": "e11573bdeeeddfc0",
+      "parent_seq": null,
+      "meta": {
+        "model": "qwen-plus-latest",
+        "usage": {
+          "completion_tokens": 22,
+          "prompt_tokens": 554,
+          "total_tokens": 576
+        },
+        "finish_reason": "stop"
+      }
+    }
+  ]
+}

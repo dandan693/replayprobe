@@ -1,0 +1,11 @@
+{
+  "name": "default",
+  "max_severity": "d1_wording",
+  "divergence_floor": "d2_path",
+  "allow_fork_after": null,
+  "max_divergence_ratio": 0.0,
+  "min_matched_ratio": 0.6,
+  "forbid_crash": true,
+  "forbid_safety_fork": true,
+  "notes": "默认预算：只允许措辞差异。刻意定得紧 —— 门禁应该一开始就红，然后由人一条条放宽。反过来（先松后紧）在实践中几乎不会发生。divergence_floor 与 max_severity 同级：既然 D2 都不许出现，它当然要计入分叉率。这档适用于「同一 prompt、同一模型、重跑一遍」的对照组 —— 也是唯一能测出上游非确定性有多大的那组。"
+}

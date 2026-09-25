@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "replayprobe"
+version = "0.1.0"
+description = "Agent 轨迹回放与分叉诊断：录一次，改一个变量，再放一遍。"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["llm", "agent", "testing", "replay", "determinism", "regression"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: Software Development :: Testing",
+]
+dependencies = []
+# **零第三方依赖是刻意的。** 一个测试框架如果需要装一堆东西才能跑，
+# 就不会有人在一个陌生仓库里跑它 —— 而「别人愿意跑」正是门禁的前提。
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+replayprobe = "replayprobe.cli:main"
+
+[tool.setuptools]
+packages = ["replayprobe", "replayprobe.agent"]

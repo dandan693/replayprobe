@@ -1,0 +1,74 @@
+# replayprobe .gitignore
+#
+# 规则顺序有语义：**后面的规则覆盖前面的**。所以"反忽略"（!）必须写在末尾，
+# 否则会被更靠后的通配规则重新吃掉 —— 这个坑真的踩过，见文件末尾的说明。
+
+# 真值库：69 MB，由 tools/build_truth_db.py 生成，不进 git
+data/truth/*.db
+
+# 原始数据缓存：在线取数会往这里放 zip（24 MB）+ xlsx（24 MB）+ csv（49 MB），不进 git。
+# 来源与重建命令写在 README 和 tools/build_truth_db.py 里：
+#     python tools/build_truth_db.py --download
+data/raw/
+
+# 录制带与回放产物：带里存的是完整的模型输入输出，默认不进 git
+data/tapes/*.json
+reports/*.html
+reports/*.json
+
+# 旁挂文件：录制带（*.tape.json）与判定结果（*.verdict.json）
+*.tape.json
+*.verdict.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# 密钥：绝对不能进仓库
+#
+# 这几条曾经写得太窄，实测才发现问题 —— 原来的规则是 `*密钥*.txt`，
+# 而真实文件名是「api密**匙**.txt」：**钥 和 匙 是两个不同的字**。
+# 差这一个字，规则就没匹配上，真正的 Key 文件是可以被提交的。
+# 教训：**用一条自以为匹配的规则去保护秘密，比没有规则更危险**，
+# 因为它会给你"已经保护好了"的错觉。
+# 所以现在按"任何看起来像凭据的 txt / env 文件"来兜，宁可宽一点。
+*key*.txt
+*Key*.txt
+*KEY*.txt
+*密钥*.txt
+*密匙*.txt
+*密码*.txt
+*.env
+.env
+.env.*
+secrets.json
+credentials.json
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
+
+# ── 例外：这条真实模型的带是刻意入库的 ────────────────────────────────
+# **必须写在文件最末尾**：`*.tape.json` 是通配规则，任何写在它之前的
+# 反忽略都会失效。第一版就把它写在了前面，于是带仍然被忽略 ——
+# 而 git 不会报错，它只是安静地不提交。这类"安静地没生效"正是本项目
+# 最警惕的失败模式，所以这条注释写在这里而不是写在别处。
+#
+# 它的价值在于：别人 clone 之后，**不装依赖、不要 API Key、不联网**，
+# 就能把一条真实模型（qwen-plus-latest）的轨迹逐字重放出来：
+#
+#   python -m replayprobe run \
+#     --tape data/tapes/real_qwen-plus-latest_t0_total.tape.json \
+#     --mode exact --out reports/real_exact.json
+#
+# 这是"重放"这件事本身的自证 —— 不是演示脚本里的说辞，是可以自己跑一遍的事实。
+# 已核查：不含 API Key、不含任何凭据、不含 Authorization 头，
+# 只有 system prompt、模型回答和一次 SQL 的返回值。
+!data/tapes/real_qwen-plus-latest_t0_total.tape.json
+!data/tapes/real_qwen-plus-latest_t0_total.trace.json

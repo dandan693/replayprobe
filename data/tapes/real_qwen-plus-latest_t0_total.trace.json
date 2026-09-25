@@ -1,0 +1,105 @@
+{
+  "run_id": "r-total-real:qwen-plus-latest@t0.0",
+  "task_id": "total",
+  "variant": "real:qwen-plus-latest@t0.0",
+  "mode": "live",
+  "fork_at": null,
+  "manifest": {
+    "tape_id": "t0_1.tape",
+    "task_id": "total",
+    "created_at": "2026-09-25T10:35:12",
+    "agent_variant": "react-v1",
+    "model": "qwen-plus-latest",
+    "model_revision": "",
+    "prompt_hash": "a234d49997639662",
+    "tool_schema_hash": "2ea1db9e4775c191",
+    "dataset_snapshot": "retail_truth.db",
+    "notes": "llm=real; label=real:qwen-plus-latest@t0.0; max_steps=8",
+    "limitations": [
+      "真实模型的返回**不保证可复现**：temperature=0 只是降低随机性，不等于确定性 —— 而这恰恰是本工具要测量的对象，不是它的缺陷。",
+      "轨迹里记录的是该次调用的实际返回；上游若对同一 prompt 做了缓存或路由，本工具无从知晓，也不假装知道。",
+      "只记录了模型别名，未记录具体服务版本 —— 别名可能指向不同权重"
+    ]
+  },
+  "notes": [],
+  "steps": [
+    {
+      "seq": 1,
+      "kind": "llm_call",
+      "payload": {
+        "content": "",
+        "tool_call": {
+          "name": "run_sql",
+          "arguments": {
+            "sql": "SELECT SUM(Amount) AS total_sales FROM retail"
+          }
+        },
+        "finish": "tool_use"
+      },
+      "source": "live",
+      "tape_seq": null,
+      "parent_seq": null,
+      "meta": {
+        "model": "qwen-plus-latest",
+        "usage": {
+          "completion_tokens": 28,
+          "prompt_tokens": 513,
+          "total_tokens": 541
+        },
+        "finish_reason": "tool_calls"
+      }
+    },
+    {
+      "seq": 2,
+      "kind": "tool_call",
+      "payload": {
+        "name": "run_sql",
+        "arguments": {
+          "sql": "SELECT SUM(Amount) AS total_sales FROM retail"
+        },
+        "ok": true,
+        "value": [
+          {
+            "total_sales": 8887208.894
+          }
+        ]
+      },
+      "source": "live",
+      "tape_seq": null,
+      "parent_seq": null,
+      "meta": {}
+    },
+    {
+      "seq": 3,
+      "kind": "llm_call",
+      "payload": {
+        "content": "全量总销售额是 8887208.894 美元。",
+        "tool_call": null,
+        "finish": "stop"
+      },
+      "source": "live",
+      "tape_seq": null,
+      "parent_seq": null,
+      "meta": {
+        "model": "qwen-plus-latest",
+        "usage": {
+          "completion_tokens": 22,
+          "prompt_tokens": 554,
+          "total_tokens": 576
+        },
+        "finish_reason": "stop"
+      }
+    },
+    {
+      "seq": 4,
+      "kind": "final",
+      "payload": {
+        "text": "全量总销售额是 8887208.894 美元。"
+      },
+      "source": "live",
+      "tape_seq": null,
+      "parent_seq": null,
+      "meta": {}
+    }
+  ]
+}
