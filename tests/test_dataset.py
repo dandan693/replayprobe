@@ -26,6 +26,7 @@ from unittest import mock
 
 from replayprobe.dataset import (
     DatasetError,
+    _looks_like_xlsx,
     col_index,
     download_zip,
     excel_serial_to_text,
@@ -682,6 +683,72 @@ class TestFetchOnlineRetail(unittest.TestCase):
                 m.return_value = _FakeResp(_zip_bytes())
                 fetch_online_retail(raw, force=True)
                 m.assert_called_once()
+
+    # ── 第二条通路：zip 挂了改走 xlsx 直链 ────────────────────────────────
+    #
+    # `UCI_XLSX_URL` 原本只写在注释里说"留作退路"，代码根本没实现它。
+    # 这正是本项目自己反复猎杀的那类问题：注释承诺了，实现没有。
+
+    def test_xlsx_validator_rejects_the_outer_zip(self):
+        """xlsx 本身也是 zip —— 所以校验不能只看 is_zipfile。
+
+        把 UCI 的外层 zip（里面装着一个 xlsx）当成 xlsx 放行，
+        会在解析阶段以更难懂的方式失败。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            outer = Path(d) / "online+retail.zip"
+            outer.write_bytes(_zip_bytes())
+            self.assertTrue(zipfile.is_zipfile(outer))     # 它"是"一个 zip
+            self.assertFalse(_looks_like_xlsx(outer))      # 但它不是 xlsx
+
+    def test_xlsx_validator_accepts_a_real_xlsx(self):
+        with tempfile.TemporaryDirectory() as d:
+            x = _write_xlsx(Path(d) / "a.xlsx",
+                            shared=("h",), sheet_xml=_sheet(_row(1, [_shared("A1", 0)])))
+            self.assertTrue(_looks_like_xlsx(x))
+
+    def test_zip_failure_falls_back_to_the_xlsx_direct_url(self):
+        """zip 通路失败 → 自动换 xlsx 直链，全程不需要人干预。"""
+        with tempfile.TemporaryDirectory() as d:
+            raw = Path(d)
+            payload = _xlsx_bytes(
+                shared=("InvoiceDate",),
+                sheet_xml=_sheet(_row(1, [_shared("A1", 0)])
+                                 + _row(2, [_num("A2", "40513.351388888892")])))
+
+            with mock.patch("replayprobe.dataset.download_zip",
+                            side_effect=DatasetError("zip 通路挂了")), \
+                    mock.patch("replayprobe.dataset.urllib.request.urlopen",
+                               return_value=_FakeResp(payload)) as m:
+                got = fetch_online_retail(raw)
+
+            self.assertTrue(got.exists())
+            self.assertEqual(m.call_count, 1)
+            # 打出去的必须是 xlsx 直链，而不是又去撞 zip
+            url_hit = m.call_args[0][0].full_url
+            self.assertIn("Online%20Retail.xlsx", url_hit)
+            self.assertFalse((raw / "online+retail.zip").exists())
+
+    def test_both_paths_failing_is_the_only_real_failure(self):
+        """两条都挂了才报错 —— 而且报错里要能看出两条都试过了。
+
+        注意这里 patch 的是 `download_xlsx` 而不是 `urlopen`：
+        `download_file` 的 `sleep=time.sleep` 是**默认参数，定义时就绑定了**，
+        patch `dataset.time.sleep` 对它是无效的 —— 那样测试会真的睡 6 秒。
+        （踩过这个坑，所以写在注释里。）
+        """
+        with tempfile.TemporaryDirectory() as d:
+            raw = Path(d)
+            with mock.patch("replayprobe.dataset.download_zip",
+                            side_effect=DatasetError("zip 通路挂了")), \
+                    mock.patch("replayprobe.dataset.download_xlsx",
+                               side_effect=DatasetError(
+                                   "两条通路都挂了\n  可以手动下载后放到 x 再重跑")):
+                with self.assertRaises(DatasetError) as cm:
+                    fetch_online_retail(raw)
+            self.assertIn("手动下载", str(cm.exception))
+            self.assertFalse((raw / "online_retail.csv").exists())
+            self.assertFalse((raw / "Online Retail.xlsx").exists())
 
 
 # ── 源 CSV 编码 ─────────────────────────────────────────────────────────

@@ -6,7 +6,7 @@
 
 ![deps](https://img.shields.io/badge/dependencies-0-brightgreen)
 
-![tests](https://img.shields.io/badge/tests-189%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-193%20passed-brightgreen)
 
 
 
@@ -58,8 +58,11 @@ python tools/demo_replay.py                 # 五段式端到端演示，退出�
 python tools/build_truth_db.py --src "/path/to/Online Retail.xlsx"   # .xlsx 和 .csv 都吃
 ```
 
-> 下载**断了会自己重试**（最多 3 次，退避 2s / 4s），而且全程先写 `.part`、
-> 校验通过才改名 —— 所以哪怕真的失败了，你也不会在 `data/raw/` 里捡到半个文件。
+> 下载**断了会自己重试**（最多 3 次，退避 2s / 4s），**zip 通路失败会自动换
+> xlsx 直链**（两条在 UCI 上是不同路径），而且全程先写 `.part`、校验通过才改名 ——
+> 所以哪怕真的失败了，你也不会在 `data/raw/` 里捡到半个文件。
+> 实测 UCI **不支持断点续传**（`Range` 头被忽略），所以重试是从头再来；
+> 网络实在不通时，用 `--src` 指自己手上的文件最省事。
 
 > **这一段原来是个坑，写在这里是因为它很典型。**  
 > 上一版的「30 秒上手」第一步是 `python tools/build_truth_db.py`，而那个脚本  
@@ -459,7 +462,7 @@ replayprobe/
 │   ├── build_truth_db.py   取原始数据（--download 自动下载）并建真值库
 │   ├── probe_real_llm.py   真实模型连通性探针（一次调用，验协议）
 │   └── demo_replay.py      五段式端到端演示（最短的上手入口）
-├── tests/                  189 项单测（标准库 unittest，零依赖）
+├── tests/                  193 项单测（标准库 unittest，零依赖）
 ├── data/
 │   ├── truth/              真值库（不进 git，本地跑 build_truth_db.py 生成）
 │   ├── raw/                原始数据缓存（不进 git，--download 自动获取）
@@ -496,7 +499,7 @@ replayprobe/
   run: |
     python tools/build_truth_db.py --download
     python -m replayprobe check
-    python -m unittest discover -s tests -t .          # 189 项
+    python -m unittest discover -s tests -t .          # 193 项
 
     # ① 确定性自证：同一个带重放两次，必须逐字一致
     python -m replayprobe run --tape "$TAPE" --mode exact --out reports/a.json
@@ -593,12 +596,12 @@ $ python -m replayprobe gate --dir reports --budget default ; echo $?
     **这是目前最明显的一个静默失败口子。** 用 `--src` 指自己的数据前，请先确认编码。
     没有做「多编码猜测」是刻意的：猜测会引入一个不可复现的判据，
     而且它给出的是**虚假的安全感** —— 错判一次比要求人先转码贵得多。
-18. **下载不支持断点续传。** 实测 UCI 在 chunked 编码下会中途断流
-    （抛 `http.client.IncompleteRead` —— 它**不是** `OSError` 的子类，
-    所以原先的 except 抓不住它，这个 bug 是新 clone 实测逼出来的，见
-    `docs/真实实验记录.md` 8.5）。现在有 3 次退避重试 + `.part` 校验，
-    但重试是**从头再下一遍**，不是从断点接着下。网速很慢的机器上可能反复重来 ——
-    那种情况直接用 `--src` 指自己手上的 xlsx / csv，一步都不联网。
+18. **下载不支持断点续传 —— 服务器不支持，不是没做。** 实测发 `Range` 头
+    **被 UCI 忽略**（响应里没有 `Accept-Ranges`，带 Range 的请求仍然返回整个
+    文件而不是 206），所以重试只能从头再下一遍。现在有两条独立通路
+    （zip → 失败自动换 xlsx 直链）+ 3 次退避重试 + `.part` 完整性校验，
+    但这些都不解决"网速太慢传不完"。那种情况直接用 `--src` 指自己手上的
+    xlsx / csv，一步都不联网。相关的实测记录见 `docs/真实实验记录.md` 8.5。
 
 ---
 

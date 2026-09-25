@@ -59,13 +59,19 @@ __all__ = [
     "sniff_encoding",
     "xlsx_rows",
     "xlsx_to_csv",
+    "download_file",
     "download_zip",
+    "download_xlsx",
     "extract_single",
     "fetch_online_retail",
 ]
 
-# UCI 的两个入口。zip 是首选（一次就能拿全）；xlsx 是直链，留作 zip 挂掉时的退路。
+# UCI 的两个入口，**两条独立通路**：
+# · zip 是主通路（一次拿全，23.7 MB）；
+# · xlsx 直链是退路，zip 下载失败时自动改走它（见 fetch_online_retail）。
 # 两个地址都实测 HTTP 200（见 docs/真实实验记录.md 第 8 节）。
+# 注意：两条都是 chunked 编码（无 Content-Length），且**服务器忽略 Range**
+# —— 实测过，所以不支持断点续传，重试只能从头再来。
 UCI_ZIP_URL = "https://archive.ics.uci.edu/static/public/352/online+retail.zip"
 UCI_XLSX_URL = ("https://archive.ics.uci.edu/ml/machine-learning-databases/"
                 "00352/Online%20Retail.xlsx")
@@ -348,16 +354,24 @@ def _download_once(part: Path, url: str, timeout: int,
     return got
 
 
-def download_zip(dest: str | Path, *, url: str = UCI_ZIP_URL, timeout: int = 600,
-                 force: bool = False, retries: int = 3, backoff: float = 2.0,
-                 sleep: Callable[[float], None] = time.sleep,
-                 log: Callable[[str], None] | None = None) -> Path:
-    """下载 zip 到 `dest`（已存在就复用）。返回 zip 路径。
+def download_file(dest: str | Path, *, url: str, validate: Callable[[Path], bool],
+                  what: str = "文件", hint_bytes: str | None = None,
+                  timeout: int = 600, force: bool = False, retries: int = 3,
+                  backoff: float = 2.0, sleep: Callable[[float], None] = time.sleep,
+                  log: Callable[[str], None] | None = None) -> Path:
+    """把 `url` 下载到 `dest`（已存在就复用），返回 `dest`。
 
-    下载**先写 .part，校验完整后再改名**。「看起来下载完了但其实是半个文件」
-    是这类脚本最经典的静默失败：zipfile 可能连读都不报错。
+    这是**通用**下载器：`validate` 决定"下到的这个文件算不算数"。
+    zip 用 `zipfile.is_zipfile`，xlsx 用 `_looks_like_xlsx`。
 
-    ## 为什么要重试（这行代码是被真实故障逼出来的）
+    ## 纪律一：先写 .part，校验通过才改名
+
+    「看起来下载完了但其实是半个文件」是这类脚本最经典的静默失败 ——
+    zipfile 可能连读都不报错。所以**先写 .part，校验完整后再 replace**。
+
+    ## 纪律二：断一次不算失败，断够 retries 次才算
+
+    这一条是被真实故障逼出来的，不是预防性设计。
 
     原先这里只捕获 `(URLError, TimeoutError, OSError)`。但 UCI 是 chunked 编码，
     连接中途断掉时抛的是 **`http.client.IncompleteRead`** ——
@@ -366,8 +380,14 @@ def download_zip(dest: str | Path, *, url: str = UCI_ZIP_URL, timeout: int = 600
     使用者看到的是裸堆栈，而不是那句"可以手动下载后重跑"。
 
     这个 bug 只在**网络真的抖了一下**的时候才出现，本机跑十次也未必遇上一次 ——
-    是新 clone 的实测把它逼出来的。所以现在的纪律是：
-    **断一次不算失败，自动重来；断够 `retries` 次才算失败，并且不留残骸。**
+    是新 clone 的实测把它逼出来的。
+
+    ## 已实测确认：UCI 不支持断点续传
+
+    所以重试只能从头再来。发 `Range` 头实测**被服务器忽略**
+    （没有 `Accept-Ranges`，带 Range 的请求仍然返回整个文件而不是 206）——
+    因此这里没有实现续传，**这是环境限制，不是偷懒**。
+    也因此 `fetch_online_retail()` 准备了两条独立通路。
     """
     dest = Path(dest)
     if dest.exists() and dest.stat().st_size > 0 and not force:
@@ -406,22 +426,51 @@ def download_zip(dest: str | Path, *, url: str = UCI_ZIP_URL, timeout: int = 600
                 sleep(wait)
 
     if last_exc is not None:
+        extra = f"\n  {hint_bytes}" if hint_bytes else ""
         raise DatasetError(
             f"下载失败（重试 {max(1, retries)} 次都没成功）：{url}\n"
-            f"  {type(last_exc).__name__}: {last_exc}\n"
+            f"  {type(last_exc).__name__}: {last_exc}{extra}\n"
             f"  可以手动下载后放到 {dest} 再重跑（脚本会自动复用）。") from last_exc
 
     size = part.stat().st_size
-    if not zipfile.is_zipfile(part):
+    if not validate(part):
         part.unlink(missing_ok=True)
         raise DatasetError(
-            f"下载回来的不是 zip（收到 {size:,} 字节）：{url}\n"
+            f"下载回来的不是可用的{what}（收到 {size:,} 字节）：{url}\n"
             f"  可能是重定向到了错误页、网络中间有代理，或者连接在末尾被截断了。"
             f"\n  可以手动下载后放到 {dest} 再重跑（脚本会自动复用）。")
     part.replace(dest)
     if log:
         log(f"已保存 {dest}（{size / 1e6:.1f} MB）")
     return dest
+
+
+def download_zip(dest: str | Path, *, url: str = UCI_ZIP_URL, **kw) -> Path:
+    """下载 UCI 的 zip 容器。见 `download_file()` 的说明。"""
+    return download_file(dest, url=url, validate=zipfile.is_zipfile,
+                         what="zip", **kw)
+
+
+def _looks_like_xlsx(path: Path) -> bool:
+    """xlsx 本身也是 zip，所以**不能只用 is_zipfile 判断**。
+
+    必须再确认里面有 `xl/workbook.xml` —— 否则一个正好是合法 zip 的错误页
+    （或者 UCI 的那个外层 zip）会被当成 xlsx 放行，然后在解析阶段
+    以更难懂的方式失败。
+    """
+    if not zipfile.is_zipfile(path):
+        return False
+    try:
+        with zipfile.ZipFile(path) as zf:
+            return "xl/workbook.xml" in zf.namelist()
+    except (zipfile.BadZipFile, OSError):
+        return False
+
+
+def download_xlsx(dest: str | Path, *, url: str = UCI_XLSX_URL, **kw) -> Path:
+    """下载 xlsx 直链。这是 zip 通路之外的第二条独立通路。"""
+    return download_file(dest, url=url, validate=_looks_like_xlsx,
+                         what="xlsx", **kw)
 
 
 def extract_single(zip_path: str | Path, dest_dir: str | Path, *,
@@ -549,6 +598,14 @@ def fetch_online_retail(raw_dir: str | Path, *, force: bool = False,
 
     步骤：zip（缓存）→ xlsx（解出）→ csv（转换）。每一步都已存在就跳过，
     所以第二次跑是秒级的。`force=True` 会从头重来。
+
+    ## 两条通路，不是为了好看
+
+    主通路是 zip（一次拿全），失败就换 **xlsx 直链** ——
+    两个地址在 UCI 上是不同的路径，实测其中一条抖了另一条未必抖。
+    这个退路原先只写在 `UCI_XLSX_URL` 的注释里、**代码根本没实现**，
+    属于本项目自己反复猎杀的那类问题（注释承诺了，实现没有）。
+    现在已经接上，并且两条都失败时才会真的报错。
     """
     raw_dir = Path(raw_dir)
     csv_path = raw_dir / "online_retail.csv"
@@ -557,7 +614,16 @@ def fetch_online_retail(raw_dir: str | Path, *, force: bool = False,
             log(f"复用 {csv_path}")
         return csv_path
 
-    zip_path = download_zip(raw_dir / "online+retail.zip", force=force, log=log)
-    xlsx_path = extract_single(zip_path, raw_dir, log=log)
+    xlsx_path = raw_dir / "Online Retail.xlsx"
+    try:
+        zip_path = download_zip(raw_dir / "online+retail.zip",
+                                url=UCI_ZIP_URL, force=force, log=log)
+        xlsx_path = extract_single(zip_path, raw_dir, log=log)
+    except DatasetError as exc:
+        if log:
+            log(f"zip 通路失败：{exc}")
+            log(f"改走第二条通路（xlsx 直链）：{UCI_XLSX_URL}")
+        xlsx_path = download_xlsx(xlsx_path, url=UCI_XLSX_URL, force=force, log=log)
+
     xlsx_to_csv(xlsx_path, csv_path, date_columns=date_columns, log=log)
     return csv_path
