@@ -38,9 +38,11 @@ from __future__ import annotations
 import codecs
 import csv
 import datetime as _dt
+import http.client
 import io
 import shutil
 import sys
+import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -309,13 +311,63 @@ def xlsx_rows(path: str | Path) -> Iterator[list[str]]:
 
 # ── 下载 ────────────────────────────────────────────────────────────────
 
+class _Truncated(RuntimeError):
+    """内部用：服务端声明的长度和实收长度对不上。
+
+    单独做一个类型，是为了让它和网络异常走同一条重试路径 ——
+    截断绝大多数时候也是**瞬时**的，不该一断就判死刑。
+    """
+
+
+def _download_once(part: Path, url: str, timeout: int,
+                   log: Callable[[str], None] | None) -> int:
+    """下载一次到 `part`，返回收到的字节数。失败往上抛，由调用方决定是否重试。"""
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        # 注意：UCI 走的是 **chunked 编码**（实测响应头里没有 Content-Length），
+        # 所以 total 常常是 0，下面那句长度校验对这份数据其实是跳过的。
+        # 真正兜住截断的是 is_zipfile —— zip 的中央目录在文件末尾，
+        # 被截断的 zip 一定读不出来。
+        total = int(r.headers.get("Content-Length") or 0)
+        got = 0
+        last_pct = -1
+        with open(part, "wb") as fh:
+            while True:
+                chunk = r.read(1 << 20)
+                if not chunk:
+                    break
+                fh.write(chunk)
+                got += len(chunk)
+                if log and total:
+                    pct = got * 100 // total
+                    if pct != last_pct and pct % 5 == 0:
+                        last_pct = pct
+                        log(f"  {got / 1e6:.0f}/{total / 1e6:.0f} MB（{pct}%）")
+    if total and got != total:
+        raise _Truncated(f"下载不完整：收到 {got:,} 字节，声明 {total:,} 字节")
+    return got
+
+
 def download_zip(dest: str | Path, *, url: str = UCI_ZIP_URL, timeout: int = 600,
-                 force: bool = False,
+                 force: bool = False, retries: int = 3, backoff: float = 2.0,
+                 sleep: Callable[[float], None] = time.sleep,
                  log: Callable[[str], None] | None = None) -> Path:
     """下载 zip 到 `dest`（已存在就复用）。返回 zip 路径。
 
     下载**先写 .part，校验完整后再改名**。「看起来下载完了但其实是半个文件」
     是这类脚本最经典的静默失败：zipfile 可能连读都不报错。
+
+    ## 为什么要重试（这行代码是被真实故障逼出来的）
+
+    原先这里只捕获 `(URLError, TimeoutError, OSError)`。但 UCI 是 chunked 编码，
+    连接中途断掉时抛的是 **`http.client.IncompleteRead`** ——
+    它继承自 `HTTPException`，**不是 `OSError` 的子类**，所以整个 except 抓不住它。
+    后果有两个，都是坏的：半截 `.part` 留在磁盘上没人清；
+    使用者看到的是裸堆栈，而不是那句"可以手动下载后重跑"。
+
+    这个 bug 只在**网络真的抖了一下**的时候才出现，本机跑十次也未必遇上一次 ——
+    是新 clone 的实测把它逼出来的。所以现在的纪律是：
+    **断一次不算失败，自动重来；断够 `retries` 次才算失败，并且不留残骸。**
     """
     dest = Path(dest)
     if dest.exists() and dest.stat().st_size > 0 and not force:
@@ -325,40 +377,47 @@ def download_zip(dest: str | Path, *, url: str = UCI_ZIP_URL, timeout: int = 600
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")
+    # 清掉上一次崩在半路留下的 .part。不清的话它会一直躺在那里，
+    # 让下一个人怀疑"到底下载了没有"。
+    if part.exists():
+        part.unlink(missing_ok=True)
+        if log:
+            log(f"清掉上次留下的半截文件 {part.name}")
+
     if log:
         log(f"下载 {url}")
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            total = int(r.headers.get("Content-Length") or 0)
-            got = 0
-            last_pct = -1
-            with open(part, "wb") as fh:
-                while True:
-                    chunk = r.read(1 << 20)
-                    if not chunk:
-                        break
-                    fh.write(chunk)
-                    got += len(chunk)
-                    if log and total:
-                        pct = got * 100 // total
-                        if pct != last_pct and pct % 5 == 0:
-                            last_pct = pct
-                            log(f"  {got / 1e6:.0f}/{total / 1e6:.0f} MB（{pct}%）")
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        part.unlink(missing_ok=True)
+
+    last_exc: BaseException | None = None
+    for attempt in range(1, max(1, retries) + 1):
+        try:
+            _download_once(part, url, timeout, log)
+            last_exc = None
+            break
+        except (urllib.error.URLError, TimeoutError, OSError,
+                http.client.HTTPException, _Truncated) as exc:
+            # HTTPException 单独列出来，就是为了 IncompleteRead —— 见 docstring。
+            last_exc = exc
+            part.unlink(missing_ok=True)
+            if attempt < max(1, retries):
+                wait = backoff ** attempt
+                if log:
+                    log(f"  第 {attempt} 次断了（{type(exc).__name__}），"
+                        f"{wait:.0f}s 后重试")
+                sleep(wait)
+
+    if last_exc is not None:
         raise DatasetError(
-            f"下载失败：{url}\n  {type(exc).__name__}: {exc}\n"
-            f"  可以手动下载后放到 {dest} 再重跑（脚本会自动复用）。") from exc
+            f"下载失败（重试 {max(1, retries)} 次都没成功）：{url}\n"
+            f"  {type(last_exc).__name__}: {last_exc}\n"
+            f"  可以手动下载后放到 {dest} 再重跑（脚本会自动复用）。") from last_exc
 
     size = part.stat().st_size
-    if total and size != total:
-        part.unlink(missing_ok=True)
-        raise DatasetError(f"下载不完整：收到 {size:,} 字节，声明 {total:,} 字节")
     if not zipfile.is_zipfile(part):
         part.unlink(missing_ok=True)
-        raise DatasetError(f"下载回来的不是 zip：{url}\n  可能是重定向到了错误页，"
-                           f"或网络中间有代理。")
+        raise DatasetError(
+            f"下载回来的不是 zip（收到 {size:,} 字节）：{url}\n"
+            f"  可能是重定向到了错误页、网络中间有代理，或者连接在末尾被截断了。"
+            f"\n  可以手动下载后放到 {dest} 再重跑（脚本会自动复用）。")
     part.replace(dest)
     if log:
         log(f"已保存 {dest}（{size / 1e6:.1f} MB）")

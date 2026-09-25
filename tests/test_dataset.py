@@ -15,9 +15,11 @@ xlsx 由测试现场用 `zipfile` 手写，不依赖任何外部文件、也不�
 from __future__ import annotations
 
 import contextlib
+import http.client
 import io
 import tempfile
 import unittest
+import urllib.error
 import zipfile
 from pathlib import Path
 from unittest import mock
@@ -479,6 +481,26 @@ def _zip_bytes() -> bytes:
     return buf.getvalue()
 
 
+class _DroppingResp(_FakeResp):
+    """模拟**连接在传输中途断掉**。
+
+    抛的是 `http.client.IncompleteRead`（不是 OSError）—— 这正是 UCI 在
+    chunked 编码下断流的真实表现，也是那个新 clone 故障的原始形态。
+    默认不带 Content-Length，因为 UCI 实测就是不带。
+    """
+
+    def __init__(self, payload: bytes, headers: dict | None = None, after: int = 1):
+        super().__init__(payload, headers={} if headers is None else headers)
+        self._calls = 0
+        self._after = after
+
+    def read(self, n: int = -1) -> bytes:
+        self._calls += 1
+        if self._calls <= self._after:
+            return self._b.read(n)
+        raise http.client.IncompleteRead(b"partial")
+
+
 class TestDownloadZip(unittest.TestCase):
     def test_existing_file_is_reused_without_network(self):
         with tempfile.TemporaryDirectory() as d:
@@ -511,15 +533,19 @@ class TestDownloadZip(unittest.TestCase):
             self.assertFalse(dest.with_name(dest.name + ".part").exists())
 
     def test_truncated_download_is_rejected(self):
+        # 声明 1 万字节却收不到 —— 判为截断。截断也是瞬时的，所以它会走重试路径，
+        # 重试用尽才报错。这里注入空 sleep，否则测试要真的睡 2+4 秒。
         with tempfile.TemporaryDirectory() as d:
             dest = Path(d) / "x.zip"
             payload = _zip_bytes()
             headers = {"Content-Length": str(len(payload) + 10_000)}
             with mock.patch("replayprobe.dataset.urllib.request.urlopen",
-                            return_value=_FakeResp(payload, headers)):
+                            return_value=_FakeResp(payload, headers)) as m:
                 with self.assertRaises(DatasetError) as cm:
-                    download_zip(dest, url="https://example.invalid/x.zip")
+                    download_zip(dest, url="https://example.invalid/x.zip",
+                                 sleep=lambda _: None)
             self.assertIn("不完整", str(cm.exception))
+            self.assertEqual(m.call_count, 3)      # 重试了 3 次
             self.assertFalse(dest.exists())
 
     def test_network_error_is_wrapped_with_actionable_hint(self):
@@ -529,9 +555,109 @@ class TestDownloadZip(unittest.TestCase):
             with mock.patch("replayprobe.dataset.urllib.request.urlopen",
                             side_effect=urllib.error.URLError("boom")):
                 with self.assertRaises(DatasetError) as cm:
-                    download_zip(dest, url="https://example.invalid/x.zip")
+                    download_zip(dest, url="https://example.invalid/x.zip",
+                                 retries=1)
             # 报错必须告诉人"还能怎么办"，而不是只把异常原样抛上去。
             self.assertIn("手动下载", str(cm.exception))
+
+    # ── 下面这一组，全部来自一次「新 clone 实测」逼出来的真实故障 ──────────
+    #
+    # 现象：全新 clone 后跑 README 第一步，UCI 下载到 0.5 MB 时连接断掉，
+    # 抛 http.client.IncompleteRead 直接穿透出去，磁盘上留下一个
+    # 正好 1 MB（一个 chunk）的 online+retail.zip.part。
+
+    def test_incomplete_read_is_not_an_oserror(self):
+        """把根因钉住：这就是原先 except 抓不住它的原因。
+
+        这段断言不是在测产品代码，是在守住一个**容易再次踩进去的假设** ——
+        "网络异常都是 OSError"。IncompleteRead 不是，所以漏了它。
+        """
+        self.assertFalse(issubclass(http.client.IncompleteRead, OSError))
+        self.assertTrue(issubclass(http.client.IncompleteRead,
+                                   http.client.HTTPException))
+
+    def test_incomplete_read_is_retried_then_succeeds(self):
+        """断一次不算失败 —— 第二次成功就应当静默恢复，不该惊动使用者。"""
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "x.zip"
+            payload = _zip_bytes()
+            with mock.patch("replayprobe.dataset.urllib.request.urlopen",
+                            side_effect=[_DroppingResp(payload),
+                                         _FakeResp(payload)]) as m:
+                got = download_zip(dest, url="https://example.invalid/x.zip",
+                                   sleep=lambda _: None)
+            self.assertEqual(m.call_count, 2)
+            self.assertEqual(got.read_bytes(), payload)
+            self.assertFalse(dest.with_name(dest.name + ".part").exists())
+
+    def test_persistent_failure_leaves_no_residue(self):
+        """重试用尽后：抛可操作的错、并且**不留半截文件**。
+
+        留残留物是这次真故障的第二个后果 —— 那个 1 MB 的 .part 一直躺在
+        data/raw/ 里，下一个人看到只会怀疑"到底下载了没有"。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "x.zip"
+            with mock.patch("replayprobe.dataset.urllib.request.urlopen",
+                            side_effect=lambda *a, **k: _DroppingResp(_zip_bytes())):
+                with self.assertRaises(DatasetError) as cm:
+                    download_zip(dest, url="https://example.invalid/x.zip",
+                                 sleep=lambda _: None)
+            msg = str(cm.exception)
+            self.assertIn("IncompleteRead", msg)   # 说清是什么断了
+            self.assertIn("手动下载", msg)          # 说清还能怎么办
+            self.assertFalse(dest.exists())
+            self.assertFalse(dest.with_name(dest.name + ".part").exists())
+
+    def test_incomplete_read_without_content_length_is_still_caught(self):
+        """UCI 是 chunked 编码（没有 Content-Length），所以长度校验根本不参与 ——
+        此时唯一的防线是抛出来的异常本身。这条把"没有 total 也得能兜住"钉住。"""
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "x.zip"
+            with mock.patch(
+                    "replayprobe.dataset.urllib.request.urlopen",
+                    side_effect=lambda *a, **k: _DroppingResp(_zip_bytes(),
+                                                             headers={})):
+                with self.assertRaises(DatasetError):
+                    download_zip(dest, url="https://example.invalid/x.zip",
+                                 retries=1)
+
+    def test_stale_part_file_is_cleaned_before_retrying(self):
+        """上一次崩在半路留下的 .part，这一次开头就要清掉。"""
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "x.zip"
+            stale = dest.with_name(dest.name + ".part")
+            stale.write_bytes(b"garbage from a previous crash")
+            payload = _zip_bytes()
+            with mock.patch("replayprobe.dataset.urllib.request.urlopen",
+                            return_value=_FakeResp(payload)):
+                download_zip(dest, url="https://example.invalid/x.zip")
+            self.assertEqual(dest.read_bytes(), payload)
+            self.assertFalse(stale.exists())
+
+    def test_retries_can_be_turned_down(self):
+        """retries=1 就是"只试一次" —— 也保证测试和 CI 不会为了重试空等。"""
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "x.zip"
+            with mock.patch("replayprobe.dataset.urllib.request.urlopen",
+                            side_effect=urllib.error.URLError("boom")) as m:
+                with self.assertRaises(DatasetError):
+                    download_zip(dest, url="https://example.invalid/x.zip",
+                                 retries=1)
+            self.assertEqual(m.call_count, 1)
+
+    def test_backoff_grows_between_attempts(self):
+        """退避必须是递增的，不然"重试"就只是"更用力地撞同一堵墙"。"""
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "x.zip"
+            waits: list[float] = []
+            with mock.patch("replayprobe.dataset.urllib.request.urlopen",
+                            side_effect=urllib.error.URLError("boom")):
+                with self.assertRaises(DatasetError):
+                    download_zip(dest, url="https://example.invalid/x.zip",
+                                 retries=3, backoff=2.0, sleep=waits.append)
+            self.assertEqual(len(waits), 2)         # 3 次尝试之间睡 2 次
+            self.assertLess(waits[0], waits[1])
 
 
 class TestFetchOnlineRetail(unittest.TestCase):

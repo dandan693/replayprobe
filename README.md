@@ -6,7 +6,7 @@
 
 ![deps](https://img.shields.io/badge/dependencies-0-brightgreen)
 
-![tests](https://img.shields.io/badge/tests-182%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-189%20passed-brightgreen)
 
 
 
@@ -58,6 +58,9 @@ python tools/demo_replay.py                 # 五段式端到端演示，退出�
 python tools/build_truth_db.py --src "/path/to/Online Retail.xlsx"   # .xlsx 和 .csv 都吃
 ```
 
+> 下载**断了会自己重试**（最多 3 次，退避 2s / 4s），而且全程先写 `.part`、
+> 校验通过才改名 —— 所以哪怕真的失败了，你也不会在 `data/raw/` 里捡到半个文件。
+
 > **这一段原来是个坑，写在这里是因为它很典型。**  
 > 上一版的「30 秒上手」第一步是 `python tools/build_truth_db.py`，而那个脚本  
 > **只会找本地文件、不会下载** —— 新 clone 的人走到第一步必然失败。  
@@ -65,6 +68,17 @@ python tools/build_truth_db.py --src "/path/to/Online Retail.xlsx"   # .xlsx 和
 > 而一个跑不起来的第一步，会让后面所有"你可以自己验证"的承诺一起失效。**  
 > 现在取数由 `replayprobe/dataset.py` 负责，并且"下载到的数据对不对"也一起管住了 ——  
 > 后面的 **392,692 行 + 7 项口径自检**就是它的验证器。
+
+> **补上取数之后，又抓出第二个坑 —— 而且这个只有真的全新 clone 一次才会露出来。**  
+> 照 README 从零跑一遍时，UCI 下载到 0.5 MB 时连接断掉，抛
+> `http.client.IncompleteRead`。而 `download_zip` 当时只捕获
+> `(URLError, TimeoutError, OSError)` —— **`IncompleteRead` 不是 `OSError` 的子类**，
+> 所以它整个穿透了出去：磁盘上留下一个正好 1 MB（一个 chunk）的 `.part` 残骸，
+> 使用者看到的是裸堆栈，而不是那句"可以手动下载后重跑"。  
+> 这个 bug 在本机跑十次也未必遇上一次，**是新 clone 的实测把它逼出来的**。
+> 现在 `HTTPException` 被显式纳入捕获，并且退避重试；
+> `tests/test_dataset.py` 里有 7 条测试把它钉住（含一条专门断言
+> 「`IncompleteRead` 不是 `OSError`」——那正是当初漏掉它的原因）。
 
 **而且不联网也能重放一条真实模型的轨迹** —— 仓库里存了一条  
 `qwen-plus-latest` 的录制带，可以直接逐字放出来：
@@ -445,7 +459,7 @@ replayprobe/
 │   ├── build_truth_db.py   取原始数据（--download 自动下载）并建真值库
 │   ├── probe_real_llm.py   真实模型连通性探针（一次调用，验协议）
 │   └── demo_replay.py      五段式端到端演示（最短的上手入口）
-├── tests/                  182 项单测（标准库 unittest，零依赖）
+├── tests/                  189 项单测（标准库 unittest，零依赖）
 ├── data/
 │   ├── truth/              真值库（不进 git，本地跑 build_truth_db.py 生成）
 │   ├── raw/                原始数据缓存（不进 git，--download 自动获取）
@@ -482,7 +496,7 @@ replayprobe/
   run: |
     python tools/build_truth_db.py --download
     python -m replayprobe check
-    python -m unittest discover -s tests -t .          # 182 项
+    python -m unittest discover -s tests -t .          # 189 项
 
     # ① 确定性自证：同一个带重放两次，必须逐字一致
     python -m replayprobe run --tape "$TAPE" --mode exact --out reports/a.json
@@ -579,6 +593,12 @@ $ python -m replayprobe gate --dir reports --budget default ; echo $?
     **这是目前最明显的一个静默失败口子。** 用 `--src` 指自己的数据前，请先确认编码。
     没有做「多编码猜测」是刻意的：猜测会引入一个不可复现的判据，
     而且它给出的是**虚假的安全感** —— 错判一次比要求人先转码贵得多。
+18. **下载不支持断点续传。** 实测 UCI 在 chunked 编码下会中途断流
+    （抛 `http.client.IncompleteRead` —— 它**不是** `OSError` 的子类，
+    所以原先的 except 抓不住它，这个 bug 是新 clone 实测逼出来的，见
+    `docs/真实实验记录.md` 8.5）。现在有 3 次退避重试 + `.part` 校验，
+    但重试是**从头再下一遍**，不是从断点接着下。网速很慢的机器上可能反复重来 ——
+    那种情况直接用 `--src` 指自己手上的 xlsx / csv，一步都不联网。
 
 ---
 
