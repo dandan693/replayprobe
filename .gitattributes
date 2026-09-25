@@ -1,0 +1,13 @@
+# 统一换行符：仓库与工作区一律 LF。
+#
+# 不加这一条的话，装了 Windows 版 Git、且 core.autocrlf=true 的机器
+# 写出来的文件会带着 CRLF 进仓库 —— 之后每一次 diff 都显示"整个文件被改了"，
+# 真正的改动被淹没在噪音里。
+* text=auto eol=lf
+
+# 二进制文件：不要做任何换行符转换
+*.db    binary
+*.zip   binary
+*.xlsx  binary
+*.png   binary
+*.ico   binary
