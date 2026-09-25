@@ -78,6 +78,16 @@ UCI_XLSX_URL = ("https://archive.ics.uci.edu/ml/machine-learning-databases/"
 
 USER_AGENT = "replayprobe/0.1 (+https://github.com/dandan693/replayprobe)"
 
+# 单次 socket 操作的超时（秒）—— 注意它是**每一步**的超时，不是整份文件的总时长。
+#
+# 原先这里是 600。实测过一次「服务端接住了连接但一个字节都不回」的情况：
+# 进程在 `urlopen` 等响应头那里**卡了 12 分钟、CPU 累计 0.31s、零输出**，
+# 而重试是 3 次 —— 最坏情况要让人对着屏幕等半小时，还以为它在干活。
+# 对一份 23.7 MB 的文件来说，头信息阶段和每次 1 MB 读取都远用不到 120 秒
+# （本机首次成功的整份下载才 135 秒），所以 120 既够宽容、又能及时止损。
+# 链路特别慢的可以用 `build_truth_db.py --download-timeout` 调大。
+DEFAULT_TIMEOUT = 120
+
 # Excel 的日期原点是 1899-12-30 而不是 1900-01-01。
 # 差这一天是故意的：Excel 为了兼容 Lotus 1-2-3，把 1900 当成闰年
 # （序列号 60 对应一个**并不存在**的 1900-02-29）。所以 61 以后要减掉这一天。
@@ -356,8 +366,9 @@ def _download_once(part: Path, url: str, timeout: int,
 
 def download_file(dest: str | Path, *, url: str, validate: Callable[[Path], bool],
                   what: str = "文件", hint_bytes: str | None = None,
-                  timeout: int = 600, force: bool = False, retries: int = 3,
-                  backoff: float = 2.0, sleep: Callable[[float], None] = time.sleep,
+                  timeout: int = DEFAULT_TIMEOUT, force: bool = False,
+                  retries: int = 3, backoff: float = 2.0,
+                  sleep: Callable[[float], None] = time.sleep,
                   log: Callable[[str], None] | None = None) -> Path:
     """把 `url` 下载到 `dest`（已存在就复用），返回 `dest`。
 
@@ -408,7 +419,12 @@ def download_file(dest: str | Path, *, url: str, validate: Callable[[Path], bool
         log(f"下载 {url}")
 
     last_exc: BaseException | None = None
-    for attempt in range(1, max(1, retries) + 1):
+    total_attempts = max(1, retries)
+    for attempt in range(1, total_attempts + 1):
+        if log:
+            # 每次都报一句。看着啰嗦，但**没有它，卡住和正常下载在终端上长得一模一样**
+            # —— 见上面 DEFAULT_TIMEOUT 里那次 12 分钟零输出的实测。
+            log(f"  第 {attempt}/{total_attempts} 次尝试（单步超时 {timeout}s）")
         try:
             _download_once(part, url, timeout, log)
             last_exc = None
@@ -418,7 +434,7 @@ def download_file(dest: str | Path, *, url: str, validate: Callable[[Path], bool
             # HTTPException 单独列出来，就是为了 IncompleteRead —— 见 docstring。
             last_exc = exc
             part.unlink(missing_ok=True)
-            if attempt < max(1, retries):
+            if attempt < total_attempts:
                 wait = backoff ** attempt
                 if log:
                     log(f"  第 {attempt} 次断了（{type(exc).__name__}），"
@@ -428,7 +444,7 @@ def download_file(dest: str | Path, *, url: str, validate: Callable[[Path], bool
     if last_exc is not None:
         extra = f"\n  {hint_bytes}" if hint_bytes else ""
         raise DatasetError(
-            f"下载失败（重试 {max(1, retries)} 次都没成功）：{url}\n"
+            f"下载失败（重试 {total_attempts} 次都没成功）：{url}\n"
             f"  {type(last_exc).__name__}: {last_exc}{extra}\n"
             f"  可以手动下载后放到 {dest} 再重跑（脚本会自动复用）。") from last_exc
 
@@ -592,6 +608,7 @@ def sniff_encoding(path: str | Path) -> str:
 # ── 一站式取数 ──────────────────────────────────────────────────────────
 
 def fetch_online_retail(raw_dir: str | Path, *, force: bool = False,
+                        timeout: int = DEFAULT_TIMEOUT,
                         date_columns: tuple[str, ...] = ("InvoiceDate",),
                         log: Callable[[str], None] | None = None) -> Path:
     """保证 `raw_dir` 下有一份可用的 `online_retail.csv`，返回它。
@@ -616,14 +633,15 @@ def fetch_online_retail(raw_dir: str | Path, *, force: bool = False,
 
     xlsx_path = raw_dir / "Online Retail.xlsx"
     try:
-        zip_path = download_zip(raw_dir / "online+retail.zip",
-                                url=UCI_ZIP_URL, force=force, log=log)
+        zip_path = download_zip(raw_dir / "online+retail.zip", url=UCI_ZIP_URL,
+                                force=force, timeout=timeout, log=log)
         xlsx_path = extract_single(zip_path, raw_dir, log=log)
     except DatasetError as exc:
         if log:
             log(f"zip 通路失败：{exc}")
             log(f"改走第二条通路（xlsx 直链）：{UCI_XLSX_URL}")
-        xlsx_path = download_xlsx(xlsx_path, url=UCI_XLSX_URL, force=force, log=log)
+        xlsx_path = download_xlsx(xlsx_path, url=UCI_XLSX_URL, force=force,
+                                  timeout=timeout, log=log)
 
     xlsx_to_csv(xlsx_path, csv_path, date_columns=date_columns, log=log)
     return csv_path

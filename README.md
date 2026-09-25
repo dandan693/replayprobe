@@ -6,7 +6,7 @@
 
 ![deps](https://img.shields.io/badge/dependencies-0-brightgreen)
 
-![tests](https://img.shields.io/badge/tests-193%20passed-brightgreen)
+![tests](https://img.shields.io/badge/tests-197%20passed-brightgreen)
 
 
 
@@ -63,6 +63,12 @@ python tools/build_truth_db.py --src "/path/to/Online Retail.xlsx"   # .xlsx 和
 > 所以哪怕真的失败了，你也不会在 `data/raw/` 里捡到半个文件。
 > 实测 UCI **不支持断点续传**（`Range` 头被忽略），所以重试是从头再来；
 > 网络实在不通时，用 `--src` 指自己手上的文件最省事。
+>
+> **每次尝试都会打一行日志**（`第 1/3 次尝试（单步超时 120s）`）。
+> 看着啰嗦，但没有它的话，**卡住和正常下载在终端上长得一模一样** ——
+> 实测撞见过一次"服务端接住连接但一个字节都不回"，进程静默卡了 12 分钟。
+> 单步超时是 120 秒（不是整份文件的总时长），链路特别慢可以调：
+> `--download-timeout 300`。
 
 > **这一段原来是个坑，写在这里是因为它很典型。**  
 > 上一版的「30 秒上手」第一步是 `python tools/build_truth_db.py`，而那个脚本  
@@ -462,7 +468,7 @@ replayprobe/
 │   ├── build_truth_db.py   取原始数据（--download 自动下载）并建真值库
 │   ├── probe_real_llm.py   真实模型连通性探针（一次调用，验协议）
 │   └── demo_replay.py      五段式端到端演示（最短的上手入口）
-├── tests/                  193 项单测（标准库 unittest，零依赖）
+├── tests/                  197 项单测（标准库 unittest，零依赖）
 ├── data/
 │   ├── truth/              真值库（不进 git，本地跑 build_truth_db.py 生成）
 │   ├── raw/                原始数据缓存（不进 git，--download 自动获取）
@@ -499,7 +505,7 @@ replayprobe/
   run: |
     python tools/build_truth_db.py --download
     python -m replayprobe check
-    python -m unittest discover -s tests -t .          # 193 项
+    python -m unittest discover -s tests -t .          # 197 项
 
     # ① 确定性自证：同一个带重放两次，必须逐字一致
     python -m replayprobe run --tape "$TAPE" --mode exact --out reports/a.json
@@ -599,9 +605,17 @@ $ python -m replayprobe gate --dir reports --budget default ; echo $?
 18. **下载不支持断点续传 —— 服务器不支持，不是没做。** 实测发 `Range` 头
     **被 UCI 忽略**（响应里没有 `Accept-Ranges`，带 Range 的请求仍然返回整个
     文件而不是 206），所以重试只能从头再下一遍。现在有两条独立通路
-    （zip → 失败自动换 xlsx 直链）+ 3 次退避重试 + `.part` 完整性校验，
-    但这些都不解决"网速太慢传不完"。那种情况直接用 `--src` 指自己手上的
-    xlsx / csv，一步都不联网。相关的实测记录见 `docs/真实实验记录.md` 8.5。
+    （zip → 失败自动换 xlsx 直链）+ 3 次退避重试 + `.part` 完整性校验
+    + 每次尝试都打一行日志，但**这些都不解决"网速太慢传不完"**。
+    那种情况直接用 `--src` 指自己手上的 xlsx / csv，一步都不联网。
+19. **单步超时是 120 秒，且它是"每一步"的超时、不是总时长。** 这个值取自
+    实测：本机首次成功的整份下载才 135 秒，而撞见"连接被接住但不回数据"时
+    会在 120 秒后止损重试。链路特别慢（或走代理）可以调大：
+    `--download-timeout 300`。相关的实测记录见 `docs/真实实验记录.md` 8.5 / 8.6。
+20. **测试套件里有一条会真的起 socket。** `test_stalled_connection_times_out_...`
+    用本地"只接不回"的服务器复现卡死，代价是整套测试从 0.4s 变成约 2.6s。
+    这是刻意付的价钱：**这条 bug 的全部价值就在于"socket 层真的会超时"**，
+    用 mock 就测不到它了。
 
 ---
 

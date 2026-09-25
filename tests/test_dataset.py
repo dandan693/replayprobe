@@ -17,7 +17,9 @@ from __future__ import annotations
 import contextlib
 import http.client
 import io
+import socket
 import tempfile
+import threading
 import unittest
 import urllib.error
 import zipfile
@@ -25,6 +27,7 @@ from pathlib import Path
 from unittest import mock
 
 from replayprobe.dataset import (
+    DEFAULT_TIMEOUT,
     DatasetError,
     _looks_like_xlsx,
     col_index,
@@ -659,6 +662,85 @@ class TestDownloadZip(unittest.TestCase):
                                  retries=3, backoff=2.0, sleep=waits.append)
             self.assertEqual(len(waits), 2)         # 3 次尝试之间睡 2 次
             self.assertLess(waits[0], waits[1])
+
+    def test_every_attempt_is_announced(self):
+        """卡住与正常下载，在终端上必须长得不一样。
+
+        实测过一次「连接被接住但一个字节都不回」：进程卡了 12 分钟、
+        CPU 累计 0.31s、**零输出**。原先的重试日志只在失败**之后**才打，
+        所以那 12 分钟里使用者看到的是一个完全静止的终端。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "x.zip"
+            lines: list[str] = []
+            with mock.patch("replayprobe.dataset.urllib.request.urlopen",
+                            side_effect=urllib.error.URLError("boom")):
+                with self.assertRaises(DatasetError):
+                    download_zip(dest, url="https://example.invalid/x.zip",
+                                 retries=3, sleep=lambda _: None,
+                                 log=lines.append)
+            joined = "\n".join(lines)
+            for i in (1, 2, 3):
+                self.assertIn(f"第 {i}/3 次尝试", joined)
+            self.assertIn("单步超时", joined)   # 让人知道它在等多久
+
+    def test_timeout_reaches_urlopen(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "x.zip"
+            with mock.patch("replayprobe.dataset.urllib.request.urlopen",
+                            return_value=_FakeResp(_zip_bytes())) as m:
+                download_zip(dest, url="https://example.invalid/x.zip", timeout=42)
+            self.assertEqual(m.call_args.kwargs.get("timeout"), 42)
+
+    def test_default_timeout_is_responsive_but_not_twitchy(self):
+        """把 600 那次的教训钉住。
+
+        `timeout` 是**每一步**的超时、不是整份文件的总时长，
+        所以 600 意味着"等响应头也可能枯等十分钟"，乘上 3 次重试就是半小时。
+        这里上下都设界：太短会在慢链路上误判，太长就白等。
+        """
+        self.assertGreaterEqual(DEFAULT_TIMEOUT, 60)
+        self.assertLessEqual(DEFAULT_TIMEOUT, 300)
+
+    def test_stalled_connection_times_out_instead_of_hanging(self):
+        """端到端复现「连接被接住、但一个字节都不回」。
+
+        这是实测里那次 12 分钟卡死的可控版本：本地起一个只 accept 不回数据的
+        服务器，断言它会**按时超时并重试**，而不是无限期挂着。
+        用真 socket 而不是 mock，是因为要验证的正是"socket 层超时会
+        以 TimeoutError 浮上来、并被我们的 except 接住"这条链路。
+        """
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(4)
+        port = srv.getsockname()[1]
+        held: list[socket.socket] = []
+
+        def accept_and_stall():
+            while True:
+                try:
+                    conn, _ = srv.accept()
+                except OSError:
+                    return
+                held.append(conn)      # 接住，什么都不回
+
+        threading.Thread(target=accept_and_stall, daemon=True).start()
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                dest = Path(d) / "x.zip"
+                lines: list[str] = []
+                with self.assertRaises(DatasetError) as cm:
+                    download_zip(dest, url=f"http://127.0.0.1:{port}/x.zip",
+                                 timeout=1, retries=2, backoff=0.05, log=lines.append)
+                self.assertIn("TimeoutError", str(cm.exception))
+                self.assertIn("第 2/2 次尝试", "\n".join(lines))
+                self.assertFalse(dest.exists())
+                self.assertFalse(dest.with_name(dest.name + ".part").exists())
+        finally:
+            srv.close()
+            for c in held:
+                c.close()
 
 
 class TestFetchOnlineRetail(unittest.TestCase):

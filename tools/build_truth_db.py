@@ -43,7 +43,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))          # 让直接 `python tools/build_truth_db.py` 也能 import
 
 from replayprobe.dataset import (       # noqa: E402
-    DatasetError, fetch_online_retail, sniff_encoding, xlsx_to_csv,
+    DEFAULT_TIMEOUT, DatasetError, fetch_online_retail, sniff_encoding, xlsx_to_csv,
 )
 
 # 期望的最终行数。写死在代码里是刻意的 —— 它是一道**闸门**，
@@ -134,7 +134,7 @@ def _as_csv(p: Path, *, force: bool = False) -> Path:
 
 
 def resolve_src(explicit: str | None, *, download: bool,
-                force: bool) -> Path:
+                force: bool, download_timeout: int = DEFAULT_TIMEOUT) -> Path:
     if explicit:
         p = Path(explicit)
         if not p.exists():
@@ -145,6 +145,7 @@ def resolve_src(explicit: str | None, *, download: bool,
         print("[i] 从 UCI 下载原始数据…")
         try:
             return fetch_online_retail(RAW_DIR, force=force,
+                                       timeout=download_timeout,
                                        log=lambda s: print(f"    {s}"))
         except DatasetError as exc:
             sys.exit(f"取数失败：\n{exc}")
@@ -340,8 +341,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="自己从 UCI 下载原始数据（约 24 MB，缓存到 data/raw/）")
     ap.add_argument("--force", action="store_true",
                     help="忽略已有缓存，强制重新下载与转换")
+    ap.add_argument("--download-timeout", type=int, default=DEFAULT_TIMEOUT,
+                    metavar="秒",
+                    help=f"单次 socket 操作的超时（默认 {DEFAULT_TIMEOUT}）。"
+                         f"它是每一步的超时、不是总时长；链路特别慢就调大")
     args = ap.parse_args(argv)
-    return build(resolve_src(args.src, download=args.download, force=args.force),
+    return build(resolve_src(args.src, download=args.download, force=args.force,
+                             download_timeout=args.download_timeout),
                  Path(args.out))
 
 
